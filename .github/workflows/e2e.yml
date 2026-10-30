@@ -1,0 +1,102 @@
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  DATABASE_URL: postgres://postgres:password@localhost:5432/outline
+  REDIS_URL: redis://localhost:6379
+  URL: http://localhost:3000
+  PORT: 3000
+  SECRET_KEY: F0E5AD933D7F6FD8F4DBB3E038C501C052DC0593C686D21ACB30AE205D2F634B
+  UTILS_SECRET: 3e1c7f0a9b2d4e6f8a0b2c4d6e8f0a1b3c5d7e9f1a2b4c6d8e0f2a4b6c8d0e2f
+  FILE_STORAGE: local
+  FILE_STORAGE_LOCAL_ROOT_DIR: ${{ github.workspace }}/.data
+  FORCE_HTTPS: "false"
+  RATE_LIMITER_ENABLED: "false"
+  ENABLE_UPDATES: "false"
+  PGSSLMODE: disable
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: outline
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install
+        uses: ./.github/actions/install
+
+      - name: Build
+        run: yarn build
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+
+      - name: Migrate database
+        run: yarn db:migrate --env=production-ssl-disabled
+        env:
+          NODE_ENV: production
+
+      - name: Start Outline
+        env:
+          NODE_ENV: production
+        run: |
+          mkdir -p .data
+          nohup yarn start > server.log 2>&1 &
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:3000/_health > /dev/null && exit 0
+            sleep 2
+          done
+          cat server.log
+          exit 1
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: |
+          npm ci
+          google-chrome --version
+
+      - name: Run e2e tests
+        working-directory: e2e
+        run: ./node_modules/.bin/playwright test
+        env:
+          CI: "true"
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+            e2e/test-results.json
+            server.log
+          retention-days: 30
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: e2e/test-results.json
+          retention-days: 30
